@@ -6,11 +6,14 @@ use std::{io::Cursor, iter::FromIterator, net::SocketAddr, net::UdpSocket};
 
 use crate::{error, serialization, ChunkedQuery, Node, Point, Points, Precision, Query};
 
+const API_VERSION: i32 = 2;
+
 /// The client to influxdb
 #[derive(Debug, Clone)]
 pub struct Client {
     host: Url,
     db: String,
+    bucket: Option<String>,
     authentication: Option<(String, String)>,
     jwt_token: Option<String>,
     client: HttpClient,
@@ -27,6 +30,7 @@ impl Client {
             db: db.into(),
             authentication: None,
             jwt_token: None,
+            bucket: None,
             client: HttpClient::default(),
         }
     }
@@ -41,6 +45,7 @@ impl Client {
             db: db.into(),
             authentication: None,
             jwt_token: None,
+            bucket: None,
             client,
         }
     }
@@ -64,10 +69,19 @@ impl Client {
 
     /// Set the client's jwt token
     pub fn set_jwt_token<T>(mut self, token: T) -> Self
-    where
-        T: Into<String>,
+        where
+            T: Into<String>,
     {
         self.jwt_token = Some(token.into());
+        self
+    }
+
+    /// Set the client's bucket
+    pub fn set_bucket<T>(mut self, bucket: T) -> Self
+        where
+            T: Into<String>,
+    {
+        self.bucket = Some(bucket.into());
         self
     }
 
@@ -126,7 +140,7 @@ impl Client {
     ) -> impl Future<Output = Result<(), error::Error>> {
         let line = serialization::line_serialization(points);
 
-        let mut param = vec![("db", self.db.as_str())];
+        let mut param = Vec::new();
 
         match precision {
             Some(ref t) => param.push(("precision", t.to_str())),
@@ -137,9 +151,19 @@ impl Client {
             param.push(("rp", t))
         }
 
-        let url = self.build_url("write", Some(param));
-        let fut = self.client.post(url).body(line).send();
+        let fut;
+        if API_VERSION == 2 {
+            param.push(("org", self.db.as_str()));
+            param.push(("bucket", self.bucket.as_ref().unwrap().as_str()));
+            let url = self.build_url("api/v2/write", Some(param));
+            fut = self.client.post(url).body(line).header("Authorization", "Token ".to_string() + self.jwt_token.clone().unwrap().as_str()).send();
 
+        } else {
+            param.push(("db", self.db.as_str()));
+            let url = self.build_url("write", Some(param));
+            fut = self.client.post(url).body(line).send();
+
+        }
         async move {
             let res = fut.await?;
             let status = res.status().as_u16();
